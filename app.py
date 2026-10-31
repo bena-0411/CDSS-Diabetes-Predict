@@ -8,7 +8,7 @@ from datetime import datetime
 
 # --- 1. CẤU HÌNH TRANG ---
 st.set_page_config(
-    page_title="DiaRisk 30 - Đánh giá nguy cơ tái nhập viện",
+    page_title="DiaRisk 30 - Hệ thống Hỗ trợ Lâm sàng",
     page_icon="🩺",
     layout="wide"
 )
@@ -17,7 +17,7 @@ st.set_page_config(
 if "patient_history" not in st.session_state:
     st.session_state.patient_history = []
 
-# --- 3. TẢI MÔ HÌNH VÀ DỮ LIỆU ---
+# --- 3. TẢI MÔ HÌNH VÀ KHAI BÁO ĐẶC TRƯNG AN TOÀN ---
 @st.cache_resource
 def load_model_bundle():
     bundle = joblib.load("kltn_diabetes_model.joblib")
@@ -25,14 +25,27 @@ def load_model_bundle():
 
 try:
     model_bundle = load_model_bundle()
-    model = model_bundle.get("model")
-    preprocessor = model_bundle.get("preprocessor")
-    feature_names = model_bundle.get("feature_names")
+    
+    # Kiểm tra định dạng lưu trữ của joblib
+    if isinstance(model_bundle, dict):
+        model = model_bundle.get("model")
+        preprocessor = model_bundle.get("preprocessor")
+    else:
+        model = model_bundle
+        preprocessor = None
+
+    # KHAI BÁO CỨNG DANH SÁCH ĐẶC TRƯNG ĐỂ KHÔNG BAO GIỜ BỊ LỖI NONE
+    feature_names = [
+        'age', 'time_in_hospital', 'num_lab_procedures', 
+        'num_procedures', 'num_medications', 'number_outpatient', 
+        'number_emergency', 'number_inpatient', 'number_diagnoses'
+    ]
+
 except Exception as e:
     st.error(f"Lỗi khi tải file mô hình `.joblib`: {e}")
     st.stop()
 
-# --- 4. HEADER GIAO DIỆN Y TẾ ---
+# --- 4. GIAO DIỆN Y TẾ CHUYÊN NGHIỆP (HEADER) ---
 st.markdown("""
     <style>
         .medical-header {
@@ -77,10 +90,9 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# --- 5. FORM NHẬP LIỆU HỒ SƠ BỆNH NHÂN ---
-st.markdown("### 📋 Thông tin Hành chính & Lâm sàng Bệnh nhân")
+# --- 5. FORM NHẬP LIỆU LÂM SÀNG ---
+st.markdown("### 📋 Thông tin Hành chính & Chỉ số Lâm sàng Bệnh nhân")
 with st.form("prediction_form"):
-    # Thông tin định danh hồ sơ
     st.markdown("#### 👤 Thông tin định danh")
     id_col1, id_col2 = st.columns(2)
     with id_col1:
@@ -88,7 +100,7 @@ with st.form("prediction_form"):
     with id_col2:
         patient_id = st.text_input("Mã định danh / Mã Y tế (ID)", placeholder="Ví dụ: BN-2026-8839")
 
-    st.markdown("#### 🔬 Chỉ số lâm sàng")
+    st.markdown("#### 🔬 Các chỉ số lâm sàng")
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -131,11 +143,15 @@ if submitted:
         input_data = input_data[feature_names]
 
         try:
-            processed_data = preprocessor.transform(input_data)
+            if preprocessor is not None:
+                processed_data = preprocessor.transform(input_data)
+            else:
+                processed_data = input_data
+
             prediction_proba = model.predict_proba(processed_data)[0][1]
             risk_label = "Nguy cơ cao (≥ 50%)" if prediction_proba >= 0.5 else "Nguy cơ thấp (< 50%)"
             
-            # Lưu hồ sơ vào session_state
+            # Lưu hồ sơ vào session state
             record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_record = {
                 "Thời gian": record_time,
@@ -144,7 +160,7 @@ if submitted:
                 "Xác suất tái nhập viện": f"{prediction_proba * 100:.2f}%",
                 "Đánh giá": risk_label
             }
-            st.session_state.patient_history.insert(0, new_record) # Đưa bản ghi mới nhất lên đầu
+            st.session_state.patient_history.insert(0, new_record)
             
             st.divider()
             st.markdown(f"### 📊 Kết quả Phân tích Lâm sàng cho bệnh nhân: **{patient_name}**")
@@ -172,8 +188,8 @@ if submitted:
                         s_vals = shap_values[0]
                         
                     shap_df = pd.DataFrame({
-                        "Yếu tố lâm sàng": feature_names,
-                        "Mức tác động (SHAP)": s_vals
+                        "Yếu tố lâm sàng": feature_names[:len(s_vals)],
+                        "Mức tác động (SHAP)": s_vals[:len(feature_names)]
                     }).sort_values(by="Mức tác động (SHAP)", key=abs, ascending=False).head(10)
                     
                     colors = ["#DC2626" if v > 0 else "#2563EB" for v in shap_df["Mức tác động (SHAP)"]]
@@ -199,7 +215,7 @@ if submitted:
                         xaxis=dict(range=[x_min - padding, x_max + padding])
                     )
                     st.plotly_chart(fig_shap, use_container_width=True)
-                except Exception:
+                except Exception as shap_err:
                     st.info("Biểu đồ giải thích chi tiết đang được cập nhật.")
                     
         except Exception as err:
