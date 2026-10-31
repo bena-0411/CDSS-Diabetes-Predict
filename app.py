@@ -17,24 +17,38 @@ st.set_page_config(
 if "patient_history" not in st.session_state:
     st.session_state.patient_history = []
 
-# --- 3. TẢI MÔ HÌNH VÀ KHAI BÁO ĐẶC TRƯNG AN TOÀN ---
+# --- 3. TẢI MÔ HÌNH VÀ CẤU HÌNH ĐẶC TRƯNG AN TOÀN TUYỆT ĐỐI ---
 @st.cache_resource
 def load_model_bundle():
-    bundle = joblib.load("kltn_diabetes_model.joblib")
-    return bundle
+    return joblib.load("kltn_diabetes_model.joblib")
 
 try:
     model_bundle = load_model_bundle()
     
-    # Kiểm tra định dạng lưu trữ của joblib
+    model = None
+    preprocessor = None
+    
+    # Kiểm tra linh hoạt cấu trúc file joblib
     if isinstance(model_bundle, dict):
-        model = model_bundle.get("model")
-        preprocessor = model_bundle.get("preprocessor")
+        # Thử tìm theo các tên key thông dụng
+        model = model_bundle.get("model") or model_bundle.get("clf") or model_bundle.get("estimator")
+        preprocessor = model_bundle.get("preprocessor") or model_bundle.get("scaler")
+        
+        # Nếu dict không có key chuẩn, quét tự động xem giá trị nào có hàm predict_proba
+        if model is None:
+            for val in model_bundle.values():
+                if hasattr(val, "predict_proba"):
+                    model = val
+                    break
     else:
+        # Trường hợp file joblib lưu thẳng đối tượng mô hình/pipeline
         model = model_bundle
-        preprocessor = None
 
-    # KHAI BÁO CỨNG DANH SÁCH ĐẶC TRƯNG ĐỂ KHÔNG BAO GIỜ BỊ LỖI NONE
+    # Kiểm tra xem mô hình đã tồn tại và hợp lệ chưa
+    if model is None or not hasattr(model, "predict_proba"):
+        st.error("⚠️ File `.joblib` tải lên không chứa mô hình máy học hợp lệ (thiếu hàm predict_proba).")
+        st.stop()
+
     feature_names = [
         'age', 'time_in_hospital', 'num_lab_procedures', 
         'num_procedures', 'num_medications', 'number_outpatient', 
