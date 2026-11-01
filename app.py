@@ -13,53 +13,34 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. KHỞI TẠO BỘ NHỚ LỊCH SỬ HỒ SƠ ---
+# Khởi tạo bộ nhớ lịch sử
 if "patient_history" not in st.session_state:
     st.session_state.patient_history = []
 
-# --- 3. TẢI MÔ HÌNH VÀ CẤU HÌNH ĐẶC TRƯNG AN TOÀN TUYỆT ĐỐI ---
+# --- 2. TẢI MÔ HÌNH VÀ CẤU HÌNH ĐẶC TRƯNG ---
 @st.cache_resource
 def load_model_bundle():
     return joblib.load("kltn_diabetes_model.joblib")
 
 try:
-    model_bundle = load_model_bundle()
-    
-    model = None
-    preprocessor = None
-    
-    # Kiểm tra linh hoạt cấu trúc file joblib
-    if isinstance(model_bundle, dict):
-        # Thử tìm theo các tên key thông dụng
-        model = model_bundle.get("model") or model_bundle.get("clf") or model_bundle.get("estimator")
-        preprocessor = model_bundle.get("preprocessor") or model_bundle.get("scaler")
-        
-        # Nếu dict không có key chuẩn, quét tự động xem giá trị nào có hàm predict_proba
-        if model is None:
-            for val in model_bundle.values():
-                if hasattr(val, "predict_proba"):
-                    model = val
-                    break
+    bundle = load_model_bundle()
+    # Hỗ trợ lấy model/pipeline tùy thuộc vào cách lưu
+    if "calibrator" in bundle:
+        model_to_predict = bundle["calibrator"]
+    elif "pipeline" in bundle:
+        model_to_predict = bundle["pipeline"]
     else:
-        # Trường hợp file joblib lưu thẳng đối tượng mô hình/pipeline
-        model = model_bundle
-
-    # Kiểm tra xem mô hình đã tồn tại và hợp lệ chưa
-    if model is None or not hasattr(model, "predict_proba"):
-        st.error("⚠️ File `.joblib` tải lên không chứa mô hình máy học hợp lệ (thiếu hàm predict_proba).")
-        st.stop()
-
-    feature_names = [
-        'age', 'time_in_hospital', 'num_lab_procedures', 
-        'num_procedures', 'num_medications', 'number_outpatient', 
-        'number_emergency', 'number_inpatient', 'number_diagnoses'
-    ]
-
+        model_to_predict = bundle.get("model")
+        
+    preprocessor = bundle.get("preprocessor")
+    core_model = bundle.get("model") # Dùng riêng cho SHAP
+    feature_names = bundle.get("feature_names", [])
+    
 except Exception as e:
     st.error(f"Lỗi khi tải file mô hình `.joblib`: {e}")
     st.stop()
 
-# --- 4. GIAO DIỆN Y TẾ CHUYÊN NGHIỆP (HEADER) ---
+# --- 3. GIAO DIỆN HEADER ---
 st.markdown("""
     <style>
         .medical-header {
@@ -70,185 +51,166 @@ st.markdown("""
             margin-bottom: 25px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }
-        .medical-title {
-            font-size: 28px;
-            font-weight: 700;
-            margin: 0;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            letter-spacing: -0.5px;
-        }
-        .medical-subtitle {
-            font-size: 15px;
-            color: #A3BFFA;
-            margin-top: 6px;
-            font-weight: 400;
-        }
-        .medical-footer {
-            text-align: center;
-            color: #888888;
-            font-size: 13px;
-            margin-top: 50px;
-            padding: 15px;
-            border-top: 1px solid #333333;
-        }
+        .medical-title { font-size: 28px; font-weight: 700; margin: 0; }
+        .medical-subtitle { font-size: 15px; color: #A3BFFA; margin-top: 6px; }
     </style>
     <div class="medical-header">
-        <div class="medical-title">
-            <span>🩺</span> DiaRisk 30
-        </div>
-        <div class="medical-subtitle">
-            Hệ thống hỗ trợ lâm sàng quản lý hồ sơ và dự báo xác suất tái nhập viện đái tháo đường trong 30 ngày.
-        </div>
+        <div class="medical-title">🩺 DiaRisk 30 Pro</div>
+        <div class="medical-subtitle">Hệ thống Đánh giá Rủi ro Tái nhập viện Đái tháo đường (Mô hình Hiệu chuẩn)</div>
     </div>
 """, unsafe_allow_html=True)
 
-# --- 5. FORM NHẬP LIỆU LÂM SÀNG ---
-st.markdown("### 📋 Thông tin Hành chính & Chỉ số Lâm sàng Bệnh nhân")
+# --- 4. FORM NHẬP LIỆU CHUYÊN SÂU ---
 with st.form("prediction_form"):
-    st.markdown("#### 👤 Thông tin định danh")
+    st.markdown("### 📋 Thông tin Định danh")
     id_col1, id_col2 = st.columns(2)
-    with id_col1:
-        patient_name = st.text_input("Họ và tên bệnh nhân", placeholder="Ví dụ: Nguyễn Văn A")
-    with id_col2:
-        patient_id = st.text_input("Mã định danh / Mã Y tế (ID)", placeholder="Ví dụ: BN-2026-8839")
+    with id_col1: patient_name = st.text_input("Họ và tên bệnh nhân", placeholder="Nguyễn Văn A")
+    with id_col2: patient_id = st.text_input("Mã Y tế (ID)", placeholder="BN-2026-8839")
 
-    st.markdown("#### 🔬 Các chỉ số lâm sàng")
-    col1, col2, col3 = st.columns(3)
+    # Form 1: Hành chính
+    st.markdown("### Nhóm 1: Thông tin Hành chính")
+    c1_1, c1_2, c1_3 = st.columns(3)
+    age = c1_1.selectbox("Nhóm tuổi", ["[0-10)", "[10-20)", "[20-30)", "[30-40)", "[40-50)", "[50-60)", "[60-70)", "[70-80)", "[80-90)", "[90-100)"], index=6)
+    gender = c1_2.selectbox("Giới tính", ["Male", "Female"])
+    race = c1_3.selectbox("Chủng tộc", ["Caucasian", "AfricanAmerican", "Asian", "Hispanic", "Other", "Missing"])
     
-    with col1:
-        age_group = st.selectbox("Nhóm tuổi", ["[0-10)", "[10-20)", "[20-30)", "[30-40)", "[40-50)", "[50-60)", "[60-70)", "[70-80)", "[80-90)", "[90-100)"])
-        time_in_hospital = st.number_input("Số ngày nằm viện", min_value=1, max_value=30, value=3)
-        num_lab_procedures = st.number_input("Số xét nghiệm Lab", min_value=0, max_value=200, value=30)
-        
-    with col2:
-        num_procedures = st.number_input("Số thủ thuật y tế", min_value=0, max_value=10, value=1)
-        num_medications = st.number_input("Số loại thuốc sử dụng", min_value=0, max_value=100, value=15)
-        number_outpatient = st.number_input("Số lần khám ngoại trú (1 năm qua)", min_value=0, max_value=50, value=0)
-        
-    with col3:
-        number_emergency = st.number_input("Số lần cấp cứu (1 năm qua)", min_value=0, max_value=50, value=0)
-        number_inpatient = st.number_input("Số lần điều trị nội trú (1 năm qua)", min_value=0, max_value=50, value=1)
-        number_diagnoses = st.number_input("Tổng số bệnh lý chẩn đoán kèm theo", min_value=1, max_value=20, value=5)
+    c1_4, c1_5, c1_6 = st.columns(3)
+    admission_type_id = c1_4.selectbox("Loại nhập viện (ID)", ["1", "2", "3", "4", "5", "6", "7", "8"])
+    admission_source_id = c1_5.selectbox("Nguồn nhập viện (ID)", ["1", "7", "17", "4", "2", "Other"])
+    discharge_disposition_id = c1_6.selectbox("Tình trạng xuất viện (ID)", ["1", "2", "3", "4", "5", "6", "7", "8", "22", "23", "24", "25", "27", "28"])
 
-    submitted = st.form_submit_button("🔍 Thực hiện Đánh giá & Lưu Hồ sơ", use_container_width=True)
+    # Form 2: Tiền sử
+    st.markdown("### Nhóm 2: Tiền sử & Sử dụng dịch vụ y tế")
+    c2_1, c2_2, c2_3 = st.columns(3)
+    time_in_hospital = c2_1.number_input("Số ngày nằm viện hiện tại", min_value=1, max_value=30, value=3)
+    total_visits = c2_2.number_input("Tổng số lượt khám trước đây tại viện", min_value=1, max_value=50, value=1)
+    number_inpatient = c2_3.number_input("Số lần nội trú (1 năm qua)", min_value=0, max_value=50, value=0)
+    
+    c2_4, c2_5 = st.columns(2)
+    number_outpatient = c2_4.number_input("Số lần ngoại trú (1 năm qua)", min_value=0, max_value=50, value=0)
+    number_emergency = c2_5.number_input("Số lần cấp cứu (1 năm qua)", min_value=0, max_value=50, value=0)
 
-# --- 6. XỬ LÝ DỰ BÁO VÀ LƯU TRỮ HỒ SƠ ---
+    # Form 3: Chẩn đoán & Xét nghiệm
+    st.markdown("### Nhóm 3: Chẩn đoán & Xét nghiệm")
+    icd_groups = ["Circulatory", "Respiratory", "Digestive", "Diabetes", "Injury", "Musculoskeletal", "Genitourinary", "Neoplasms", "Other", "Missing"]
+    c3_1, c3_2, c3_3 = st.columns(3)
+    diag_1 = c3_1.selectbox("Chẩn đoán chính (ICD-9 Group)", icd_groups, index=3)
+    diag_2 = c3_2.selectbox("Chẩn đoán phụ 1", icd_groups, index=0)
+    diag_3 = c3_3.selectbox("Chẩn đoán phụ 2", icd_groups, index=8)
+    
+    c3_4, c3_5, c3_6 = st.columns(3)
+    number_diagnoses = c3_4.number_input("Tổng số chẩn đoán (bao gồm bệnh nền)", min_value=1, max_value=20, value=5)
+    num_lab_procedures = c3_5.number_input("Số lần xét nghiệm Lab", min_value=1, max_value=150, value=40)
+    num_procedures = c3_6.number_input("Số thủ thuật y tế (không gồm xét nghiệm)", min_value=0, max_value=10, value=0)
+
+    # Form 4: Thuốc điều trị
+    st.markdown("### Nhóm 4: Thuốc điều trị đái tháo đường")
+    c4_1, c4_2, c4_3 = st.columns(3)
+    diabetesMed = c4_1.selectbox("Có sử dụng thuốc ĐTĐ không?", ["Yes", "No"])
+    change = c4_2.selectbox("Có thay đổi phác đồ/liều lượng không?", ["No", "Ch"])
+    num_medications = c4_3.number_input("Tổng số TẤT CẢ các loại thuốc đang dùng", min_value=1, max_value=100, value=12)
+    
+    c4_4, c4_5, c4_6 = st.columns(3)
+    num_active_meds = c4_4.number_input("Số loại thuốc RIÊNG cho ĐTĐ đang dùng", min_value=0, max_value=10, value=1)
+    insulin = c4_5.selectbox("Tình trạng dùng Insulin", ["No", "Steady", "Up", "Down"])
+    metformin = c4_6.selectbox("Tình trạng dùng Metformin", ["No", "Steady", "Up", "Down"])
+
+    submitted = st.form_submit_button("🔍 Chẩn Đoán & Phân Tầng Rủi Ro", use_container_width=True)
+
+# --- 5. XỬ LÝ VÀ DỰ BÁO ---
 if submitted:
     if not patient_name.strip():
-        st.warning("⚠️ Vui lòng nhập họ tên bệnh nhân trước khi thực hiện đánh giá.")
+        st.warning("⚠️ Vui lòng nhập họ tên bệnh nhân.")
     else:
-        input_data = pd.DataFrame({
-            'age': [age_group],
-            'time_in_hospital': [time_in_hospital],
-            'num_lab_procedures': [num_lab_procedures],
-            'num_procedures': [num_procedures],
-            'num_medications': [num_medications],
-            'number_outpatient': [number_outpatient],
-            'number_emergency': [number_emergency],
-            'number_inpatient': [number_inpatient],
-            'number_diagnoses': [number_diagnoses]
-        })
-        
+        # Tự động tính toán các biến Feature Engineering ẩn
+        service_utilization = number_outpatient + number_emergency + number_inpatient
+        labs_per_day = num_lab_procedures / max(time_in_hospital, 1)
+
+        # Gom toàn bộ dữ liệu vào Dictionary, cấu trúc khớp 100% với feature_names
+        raw_data = {
+            "age": age, "gender": gender, "race": race,
+            "admission_type_id": admission_type_id, "admission_source_id": admission_source_id, "discharge_disposition_id": discharge_disposition_id,
+            "time_in_hospital": time_in_hospital, "total_visits": total_visits, "service_utilization": service_utilization,
+            "number_inpatient": number_inpatient, "number_emergency": number_emergency, "number_outpatient": number_outpatient,
+            "diag_1": diag_1, "diag_2": diag_2, "diag_3": diag_3, "number_diagnoses": number_diagnoses,
+            "num_lab_procedures": num_lab_procedures, "num_procedures": num_procedures, "labs_per_day": labs_per_day,
+            "diabetesMed": diabetesMed, "change": change, "num_medications": num_medications, "num_active_meds": num_active_meds,
+            "insulin": insulin, "metformin": metformin
+        }
+
+        # Lọc đúng các cột mà mô hình mong đợi (loại bỏ nếu dư)
+        input_data = pd.DataFrame([raw_data])
         for col in feature_names:
             if col not in input_data.columns:
-                input_data[col] = 0
+                input_data[col] = 0  # Fallback an toàn
         input_data = input_data[feature_names]
 
         try:
-            if preprocessor is not None:
-                processed_data = preprocessor.transform(input_data)
+            # 1. Dự báo Xác suất (Hiệu chuẩn)
+            prob_risk = model_to_predict.predict_proba(input_data)[0][1]
+            prob_percent = prob_risk * 100
+            
+            # Phân tầng theo chuẩn Y tế
+            if prob_percent >= 25.0:
+                risk_label, color, alert = "Nguy cơ Cao", "red", "Cần can thiệp lâm sàng và theo dõi sát sao sau xuất viện."
+            elif prob_percent >= 12.0:
+                risk_label, color, alert = "Nguy cơ Trung bình", "orange", "Cần lưu ý, lập kế hoạch ngoại trú cẩn thận."
             else:
-                processed_data = input_data
+                risk_label, color, alert = "Nguy cơ Thấp", "green", "An toàn, tiếp tục duy trì phác đồ hiện tại."
 
-            prediction_proba = model.predict_proba(processed_data)[0][1]
-            risk_label = "Nguy cơ cao (≥ 50%)" if prediction_proba >= 0.5 else "Nguy cơ thấp (< 50%)"
-            
-            # Lưu hồ sơ vào session state
-            record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            new_record = {
-                "Thời gian": record_time,
-                "Mã ID": patient_id if patient_id else "N/A",
-                "Họ và tên": patient_name,
-                "Xác suất tái nhập viện": f"{prediction_proba * 100:.2f}%",
-                "Đánh giá": risk_label
-            }
-            st.session_state.patient_history.insert(0, new_record)
-            
             st.divider()
-            st.markdown(f"### 📊 Kết quả Phân tích Lâm sàng cho bệnh nhân: **{patient_name}**")
+            st.markdown(f"### 📊 Kết Quả Đánh Giá: **{patient_name}**")
             
-            res_col1, res_col2 = st.columns([1, 2])
-            
+            res_col1, res_col2 = st.columns([1.2, 2])
             with res_col1:
-                st.metric(label="Xác suất tái nhập viện trong 30 ngày", value=f"{prediction_proba * 100:.2f}%")
-                if prediction_proba >= 0.5:
-                    st.error("⚠️ **Đánh giá:** Nguy cơ cao tái nhập viện. Cần lập kế hoạch theo dõi sát sao.")
-                else:
-                    st.success("✅ **Đánh giá:** Nguy cơ thấp. Tiếp tục duy trì phác đồ hiện tại.")
-                    
+                st.metric(label="Xác suất tái nhập viện (<30 ngày)", value=f"{prob_percent:.1f}%")
+                st.markdown(f"<h4 style='color: {color};'>{risk_label}</h4>", unsafe_allow_html=True)
+                st.info(f"**Khuyến nghị:** {alert}")
+                
             with res_col2:
-                st.markdown("#### 🧬 GIẢI THÍCH NGUYÊN NHÂN CÁ NHÂN HÓA (SHAP)")
+                st.markdown("#### 🧬 Đóng Góp Yếu Tố Lâm Sàng (SHAP)")
                 try:
-                    explainer = shap.TreeExplainer(model)
-                    shap_values = explainer.shap_values(processed_data)
-                    
-                    if isinstance(shap_values, list):
-                        s_vals = shap_values[1][0]
-                    elif len(shap_values.shape) == 3:
-                        s_vals = shap_values[0, :, 1]
-                    else:
-                        s_vals = shap_values[0]
+                    # Trích xuất preprocessor và XGBoost core model để vẽ SHAP
+                    if preprocessor is not None and core_model is not None:
+                        processed_input = preprocessor.transform(input_data)
+                        # Nếu có selector trong pipeline, phải lấy qua selector
+                        if hasattr(model_to_predict, 'named_steps') and 'selector' in model_to_predict.named_steps:
+                            processed_input = model_to_predict.named_steps['selector'].transform(processed_input)
+                            
+                        explainer = shap.TreeExplainer(core_model)
+                        shap_values = explainer.shap_values(processed_input)
                         
-                    shap_df = pd.DataFrame({
-                        "Yếu tố lâm sàng": feature_names[:len(s_vals)],
-                        "Mức tác động (SHAP)": s_vals[:len(feature_names)]
-                    }).sort_values(by="Mức tác động (SHAP)", key=abs, ascending=False).head(10)
-                    
-                    colors = ["#DC2626" if v > 0 else "#2563EB" for v in shap_df["Mức tác động (SHAP)"]]
-                    fig_shap = go.Figure(go.Bar(
-                        x=shap_df["Mức tác động (SHAP)"],
-                        y=shap_df["Yếu tố lâm sàng"],
-                        orientation="h",
-                        marker_color=colors,
-                        text=[f"{v:+.3f}" for v in shap_df["Mức tác động (SHAP)"]],
-                        textposition="auto"
-                    ))
-                    
-                    x_min = shap_df["Mức tác động (SHAP)"].min()
-                    x_max = shap_df["Mức tác động (SHAP)"].max()
-                    padding = (x_max - x_min) * 0.2 if x_max != x_min else 0.1
+                        s_vals = shap_values[1][0] if isinstance(shap_values, list) else (shap_values[0, :, 1] if len(shap_values.shape) == 3 else shap_values[0])
+                        
+                        shap_df = pd.DataFrame({
+                            "Yếu tố lâm sàng": feature_names[:len(s_vals)],
+                            "Mức độ tác động": s_vals[:len(feature_names)]
+                        }).reindex(shap_df["Mức độ tác động"].abs().sort_values(ascending=False).index).head(8)
+                        
+                        colors = ["#DC2626" if v > 0 else "#2563EB" for v in shap_df["Mức độ tác động"]]
+                        fig_shap = go.Figure(go.Bar(
+                            x=shap_df["Mức độ tác động"], y=shap_df["Yếu tố lâm sàng"],
+                            orientation="h", marker_color=colors, text=[f"{v:+.2f}" for v in shap_df["Mức độ tác động"]], textposition="auto"
+                        ))
+                        fig_shap.update_layout(title="Yếu tố TĂNG (Đỏ) hoặc GIẢM (Xanh) nguy cơ", height=350, margin=dict(l=10, r=10, t=40, b=10))
+                        st.plotly_chart(fig_shap, use_container_width=True)
+                except Exception:
+                    st.warning("Biểu đồ phân tích chuyên sâu tạm thời không khả dụng.")
 
-                    fig_shap.update_layout(
-                        title="Top yếu tố làm TĂNG (Đỏ) hoặc GIẢM (Xanh) nguy cơ",
-                        xaxis_title="Giá trị tác động SHAP (Log-odds)",
-                        yaxis_title="",
-                        height=380,
-                        margin=dict(l=10, r=20, t=40, b=20),
-                        xaxis=dict(range=[x_min - padding, x_max + padding])
-                    )
-                    st.plotly_chart(fig_shap, use_container_width=True)
-                except Exception as shap_err:
-                    st.info("Biểu đồ giải thích chi tiết đang được cập nhật.")
-                    
-        except Exception as err:
-            st.error(f"Lỗi trong quá trình dự báo: {err}")
+            # Lưu lịch sử
+            st.session_state.patient_history.insert(0, {
+                "Thời gian": datetime.now().strftime("%Y-%m-%d %H:%M"), "Mã BN": patient_id, "Họ Tên": patient_name,
+                "Xác suất (%)": f"{prob_percent:.1f}%", "Phân loại": risk_label
+            })
 
-# --- 7. HIỂN THỊ DANH SÁCH LỊCH SỬ HỒ SƠ ĐÃ KHÁM TRONG PHIÊN ---
-if len(st.session_state.patient_history) > 0:
+        except Exception as e:
+            st.error(f"Lỗi xử lý dự báo: {e}")
+
+# --- 6. LỊCH SỬ PHIÊN ---
+if st.session_state.patient_history:
     st.divider()
-    st.markdown("### 🗂️ Danh sách Hồ sơ Bệnh nhân đã đánh giá trong phiên")
-    history_df = pd.DataFrame(st.session_state.patient_history)
-    st.dataframe(history_df, use_container_width=True, hide_index=True)
-    
-    if st.button("🗑️ Xóa lịch sử phiên làm việc"):
+    st.markdown("### 🗂️ Danh sách Bệnh nhân vừa đánh giá")
+    st.dataframe(pd.DataFrame(st.session_state.patient_history), use_container_width=True, hide_index=True)
+    if st.button("🗑️ Xóa lịch sử phiên"):
         st.session_state.patient_history = []
         st.rerun()
-
-# --- 8. CHÂN TRANG ---
-st.markdown("""
-    <div class="medical-footer">
-        Công cụ hỗ trợ nghiên cứu và tham khảo lâm sàng, không thay thế chẩn đoán chuyên môn của bác sĩ.
-    </div>
-""", unsafe_allow_html=True)
