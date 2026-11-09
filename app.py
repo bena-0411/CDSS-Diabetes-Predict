@@ -4,6 +4,9 @@ import numpy as np
 import joblib
 import plotly.graph_objects as go
 from datetime import datetime
+import pytz
+import shap
+import matplotlib.pyplot as plt
 
 # --- 1. CẤU HÌNH TRANG ---
 st.set_page_config(
@@ -58,6 +61,27 @@ try:
 except Exception as e:
     st.error(f"Lỗi khi tải file mô hình `.joblib`: {e}")
     st.stop()
+
+# --- TẠO SHAP EXPLAINER ---
+# Tính toán TreeExplainer một lần rồi lưu cache để tránh giật lag
+@st.cache_resource
+def get_shap_explainer(_model):
+    try:
+        # Nếu mô hình là một pipeline, lấy core estimator ở bước cuối cùng
+        if hasattr(_model, "steps"):
+            model_core = _model.steps[-1][1]
+        elif hasattr(_model, "estimator"):
+            model_core = _model.estimator
+        else:
+            model_core = _model
+        
+        # Extra Trees / Random Forest / XGBoost
+        explainer = shap.TreeExplainer(model_core)
+        return explainer, model_core
+    except Exception as e:
+        return None, None
+
+explainer, core_estimator = get_shap_explainer(core_model or model_to_predict)
 
 # --- 3. HEADER GIAO DIỆN ---
 st.markdown("""
@@ -164,18 +188,28 @@ if submitted:
         input_data = input_data[feature_names]
 
         try:
-            # Dự báo xác suất (Probability)
-            # Trường hợp model_to_predict là Pipeline hoặc CalibratedClassifierCV nhận raw DataFrame
+            # 1. TIỀN XỬ LÝ NẾU CÓ PREPROCESSOR ĐỂ PHỤC VỤ SHAP
+            if preprocessor is not None:
+                transformed_data = preprocessor.transform(input_data)
+                # Lấy tên cột sau khi transform (có thể bị mã hóa One-hot)
+                if hasattr(preprocessor, "get_feature_names_out"):
+                    transformed_cols = preprocessor.get_feature_names_out()
+                else:
+                    transformed_cols = [f"Feature_{i}" for i in range(transformed_data.shape[1])]
+                
+                # Biến đổi thành DataFrame để truyền vào SHAP
+                if hasattr(transformed_data, "toarray"):
+                    transformed_data = transformed_data.toarray()
+                shap_input = pd.DataFrame(transformed_data, columns=transformed_cols)
+            else:
+                shap_input = input_data
+
+            # 2. DỰ BÁO XÁC SUẤT
             if hasattr(model_to_predict, "predict_proba"):
                 try:
                     prob_risk = model_to_predict.predict_proba(input_data)[0][1]
                 except Exception:
-                    # Nếu model là mô hình trần (standalone estimator) cần transform qua preprocessor trước
-                    if preprocessor is not None:
-                        transformed_data = preprocessor.transform(input_data)
-                        prob_risk = model_to_predict.predict_proba(transformed_data)[0][1]
-                    else:
-                        raise
+                    prob_risk = model_to_predict.predict_proba(shap_input)[0][1]
             else:
                 st.error("Mô hình không hỗ trợ tính năng tính toán xác suất (predict_proba).")
                 st.stop()
@@ -206,13 +240,33 @@ if submitted:
                 st.markdown(f"<div style='font-size: 18px; font-weight: bold; color: {risk_color}; margin-top: 8px;'>{risk_label}</div>", unsafe_allow_html=True)
                 st.info(f"**Khuyến nghị chuyên môn:**\n\n{risk_advice}")
 
+                # [ĐÃ THÊM MỚI] - Cảnh báo các chỉ số lâm sàng bất thường
+                st.markdown("#### 🚨 Các chỉ số cần lưu ý:")
+                warnings_list = []
+                if number_inpatient > 0:
+                    warnings_list.append(f"Có **{number_inpatient}** lần điều trị nội trú trong năm qua.")
+                if number_emergency > 0:
+                    warnings_list.append(f"Có **{number_emergency}** lần nhập viện cấp cứu trong năm qua.")
+                if num_active_meds >= 3:
+                    warnings_list.append(f"Sử dụng nhiều loại thuốc ĐTĐ kết hợp (**{num_active_meds}** loại).")
+                if time_in_hospital > 7:
+                    warnings_list.append(f"Thời gian nằm viện kéo dài (**{time_in_hospital}** ngày).")
+                if discharge_disposition_id not in ["1", "6", "8"]:
+                     warnings_list.append(f"Tình trạng xuất viện tiềm ẩn rủi ro (Mã: {discharge_disposition_id}).")
+
+                if warnings_list:
+                    for warning in warnings_list:
+                        st.warning(warning)
+                else:
+                    st.success("Không phát hiện chỉ số lâm sàng bất thường nghiêm trọng.")
+
             with res_col2:
                 # Vẽ biểu đồ Gauge đo rủi ro trực quan
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=prob_percent,
                     number={'suffix': "%"},
-                    title={'text': "Thước Đo Mức Độ Rủi Ro"},
+                    title={'text': "Thước Đo Mức Độ Rủi Ro Tái Nhập Viện", 'font': {'size': 18}},
                     gauge={
                         'axis': {'range': [0, 100]},
                         'bar': {'color': risk_color},
@@ -228,12 +282,47 @@ if submitted:
                         }
                     }
                 ))
-                fig_gauge.update_layout(height=260, margin=dict(l=20, r=20, t=30, b=20))
+                # [ĐÃ SỬA] - Tăng lề trên (t) lên 60 để không bị cắt mất chữ
+                fig_gauge.update_layout(height=300, margin=dict(l=30, r=30, t=60, b=20))
                 st.plotly_chart(fig_gauge, use_container_width=True)
+
+            # [ĐÃ THÊM MỚI] - GIẢI THÍCH MÔ HÌNH BẰNG SHAP
+            if explainer is not None:
+                st.divider()
+                st.markdown("#### 🔬 Giải thích Khuyến nghị (Explainable AI bằng SHAP)")
+                st.markdown("Biểu đồ thể hiện mức độ tác động của từng đặc trưng lâm sàng đẩy xác suất rủi ro **Lên cao (Đỏ)** hoặc **Xuống thấp (Xanh)**.")
+                
+                try:
+                    shap_values = explainer.shap_values(shap_input)
+                    
+                    # Nếu là mô hình phân lớp nhị phân, shap_values có thể là mảng 2 chiều hoặc list 2 mảng.
+                    # Ta cần lấy mảng ứng với lớp 1 (rủi ro cao)
+                    if isinstance(shap_values, list):
+                        shap_values_to_plot = shap_values[1]
+                    else:
+                        shap_values_to_plot = shap_values
+
+                    # Vẽ biểu đồ SHAP waterfall hoặc bar
+                    # Do waterfall cần thêm đối tượng Explanation, dùng bar cho dễ và ổn định trên Streamlit
+                    fig_shap, ax_shap = plt.subplots(figsize=(10, 5))
+                    
+                    # Rút gọn tên cột nếu nó quá dài sau khi One-hot encoding
+                    short_cols = [c.replace("cat__", "").replace("num__", "") for c in shap_input.columns]
+                    shap_input.columns = short_cols
+                    
+                    shap.summary_plot(shap_values_to_plot, shap_input, plot_type="bar", max_display=10, show=False)
+                    st.pyplot(fig_shap)
+                    
+                except Exception as e:
+                    st.info("Mô hình này không hỗ trợ giải thích trực quan (SHAP) trên giao diện Web.")
+
+            # [ĐÃ SỬA] - Lấy giờ Việt Nam (UTC+7)
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            current_time = datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M")
 
             # Lưu vào danh sách lịch sử bệnh nhân
             st.session_state.patient_history.insert(0, {
-                "Thời gian": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Thời gian": current_time,
                 "Mã BN": patient_id,
                 "Họ và Tên": patient_name,
                 "Xác suất": f"{prob_percent:.1f}%",
