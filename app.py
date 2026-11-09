@@ -91,10 +91,10 @@ st.markdown("""
 
 # --- 4. FORM NHẬP LIỆU CHUYÊN SÂU ---
 with st.form("prediction_form"):
-    st.subheader("📋 Thông tin Định danh")
+    st.subheader("📋 Thông tin Định danh Bệnh nhân")
     id_col1, id_col2 = st.columns(2)
-    with id_col1: patient_name = st.text_input("Họ và tên bệnh nhân", placeholder="Nhập họ và tên...")
-    with id_col2: patient_id = st.text_input("Mã Hồ sơ Bệnh án", placeholder="Nhập mã hồ sơ...")
+    with id_col1: patient_name = st.text_input("Họ và tên bệnh nhân (Bắt buộc)", placeholder="Nhập họ và tên...")
+    with id_col2: patient_id = st.text_input("Mã Hồ sơ Bệnh án (Bắt buộc)", placeholder="Nhập mã hồ sơ...")
 
     st.subheader("Thông tin Hành chính & Nhập viện")
     c1_1, c1_2, c1_3 = st.columns(3)
@@ -142,56 +142,78 @@ with st.form("prediction_form"):
 
     submitted = st.form_submit_button("🔍 Thực hiện Đánh giá & Lưu Hồ sơ", use_container_width=True)
 
-# --- Hàm kiểm tra tính hợp lệ của dữ liệu đầu vào ---
-def validate_inputs(inputs_dict):
-    missing_fields = []
-    for key, value in inputs_dict.items():
-        if value is None or (isinstance(value, str) and value.strip() == ""):
-            missing_fields.append(key)
-    return missing_fields
+# --- Hàm hỗ trợ điền giá trị mặc định nếu người dùng không nhập ---
+def fill_default(val, default_val):
+    if val is None or (isinstance(val, str) and val.strip() == ""):
+        return default_val
+    return val
 
 # --- 5. XỬ LÝ DỮ LIỆU & DỰ BÁO ---
 if submitted:
-    raw_dict = {
-        "Họ và tên": patient_name,
-        "Mã BN": patient_id,
-        "age": age, "gender": gender, "race": race,
-        "admission_type_id": admission_type_id,
-        "admission_source_id": admission_source_id,
-        "discharge_disposition_id": discharge_disposition_id,
-        "time_in_hospital": time_in_hospital,
-        "total_visits": total_visits,
-        "number_inpatient": number_inpatient,
-        "number_emergency": number_emergency,
-        "number_outpatient": number_outpatient,
-        "diag_1": diag_1, "diag_2": diag_2, "diag_3": diag_3,
-        "number_diagnoses": number_diagnoses,
-        "num_lab_procedures": num_lab_procedures,
-        "num_procedures": num_procedures,
-        "diabetesMed": diabetesMed,
-        "change": change,
-        "num_medications": num_medications,
-        "num_active_meds": num_active_meds,
-        "insulin": insulin,
-        "metformin": metformin
-    }
-    
-    missing_fields = validate_inputs(raw_dict)
-    
-    if missing_fields:
-        st.warning("⚠️ Vui lòng điền/chọn đầy đủ tất cả các trường thông tin trước khi đánh giá.")
+    # 1. Chỉ bắt buộc nhập Tên và Mã Bệnh Nhân
+    if not patient_name.strip() or not patient_id.strip():
+        st.warning("⚠️ Vui lòng nhập 'Họ và tên bệnh nhân' và 'Mã Hồ sơ Bệnh án' để tiếp tục.")
     else:
-        service_utilization = int(number_outpatient + number_emergency + number_inpatient)
-        labs_per_day = float(num_lab_procedures / max(time_in_hospital, 1))
+        # 2. Xử lý các giá trị None, điền giá trị an toàn/mặc định (0 cho số, 'Missing' cho text)
+        safe_age = fill_default(age, "Missing")
+        safe_gender = fill_default(gender, "Missing")
+        safe_race = fill_default(race, "Missing")
+        
+        safe_admission_type_id = str(fill_default(admission_type_id, "Missing"))
+        safe_admission_source_id = str(fill_default(admission_source_id, "Missing"))
+        safe_discharge_disposition_id = str(fill_default(discharge_disposition_id, "Missing"))
+        
+        safe_time_in_hospital = fill_default(time_in_hospital, 1)
+        safe_total_visits = fill_default(total_visits, 0)
+        safe_number_inpatient = fill_default(number_inpatient, 0)
+        safe_number_outpatient = fill_default(number_outpatient, 0)
+        safe_number_emergency = fill_default(number_emergency, 0)
+        
+        safe_diag_1 = fill_default(diag_1, "Missing")
+        safe_diag_2 = fill_default(diag_2, "Missing")
+        safe_diag_3 = fill_default(diag_3, "Missing")
+        
+        safe_number_diagnoses = fill_default(number_diagnoses, 1)
+        safe_num_lab_procedures = fill_default(num_lab_procedures, 0)
+        safe_num_procedures = fill_default(num_procedures, 0)
+        
+        safe_diabetesMed = fill_default(diabetesMed, "Missing")
+        safe_change = fill_default(change, "Missing")
+        safe_num_medications = fill_default(num_medications, 0)
+        safe_num_active_meds = fill_default(num_active_meds, 0)
+        safe_insulin = fill_default(insulin, "Missing")
+        safe_metformin = fill_default(metformin, "Missing")
 
-        # Xóa các trường không phải feature của mô hình
-        model_input_dict = raw_dict.copy()
-        del model_input_dict["Họ và tên"]
-        del model_input_dict["Mã BN"]
-        model_input_dict["service_utilization"] = service_utilization
-        model_input_dict["labs_per_day"] = labs_per_day
+        # Tính toán đặc trưng kỹ thuật
+        service_utilization = int(safe_number_outpatient + safe_number_emergency + safe_number_inpatient)
+        labs_per_day = float(safe_num_lab_procedures / max(safe_time_in_hospital, 1))
 
-        input_data = pd.DataFrame([model_input_dict])
+        # Khởi tạo dữ liệu thô
+        raw_dict = {
+            "age": safe_age, "gender": safe_gender, "race": safe_race,
+            "admission_type_id": safe_admission_type_id,
+            "admission_source_id": safe_admission_source_id,
+            "discharge_disposition_id": safe_discharge_disposition_id,
+            "time_in_hospital": safe_time_in_hospital,
+            "total_visits": safe_total_visits,
+            "service_utilization": service_utilization,
+            "number_inpatient": safe_number_inpatient,
+            "number_emergency": safe_number_emergency,
+            "number_outpatient": safe_number_outpatient,
+            "diag_1": safe_diag_1, "diag_2": safe_diag_2, "diag_3": safe_diag_3,
+            "number_diagnoses": safe_number_diagnoses,
+            "num_lab_procedures": safe_num_lab_procedures,
+            "num_procedures": safe_num_procedures,
+            "labs_per_day": labs_per_day,
+            "diabetesMed": safe_diabetesMed,
+            "change": safe_change,
+            "num_medications": safe_num_medications,
+            "num_active_meds": safe_num_active_meds,
+            "insulin": safe_insulin,
+            "metformin": safe_metformin
+        }
+
+        input_data = pd.DataFrame([raw_dict])
         
         for col in feature_names:
             if col not in input_data.columns:
@@ -251,16 +273,16 @@ if submitted:
 
                 st.markdown("#### 🚨 Các chỉ số cần lưu ý:")
                 warnings_list = []
-                if number_inpatient > 0:
-                    warnings_list.append(f"Có **{number_inpatient}** lần điều trị nội trú trong năm qua.")
-                if number_emergency > 0:
-                    warnings_list.append(f"Có **{number_emergency}** lần nhập viện cấp cứu trong năm qua.")
-                if num_active_meds >= 3:
-                    warnings_list.append(f"Sử dụng nhiều loại thuốc ĐTĐ kết hợp (**{num_active_meds}** loại).")
-                if time_in_hospital > 7:
-                    warnings_list.append(f"Thời gian nằm viện kéo dài (**{time_in_hospital}** ngày).")
-                if discharge_disposition_id not in ["1", "6", "8"]:
-                     warnings_list.append(f"Tình trạng xuất viện tiềm ẩn rủi ro (Mã: {discharge_disposition_id}).")
+                if safe_number_inpatient > 0:
+                    warnings_list.append(f"Có **{safe_number_inpatient}** lần điều trị nội trú trong năm qua.")
+                if safe_number_emergency > 0:
+                    warnings_list.append(f"Có **{safe_number_emergency}** lần nhập viện cấp cứu trong năm qua.")
+                if safe_num_active_meds >= 3:
+                    warnings_list.append(f"Sử dụng nhiều loại thuốc ĐTĐ kết hợp (**{safe_num_active_meds}** loại).")
+                if safe_time_in_hospital > 7:
+                    warnings_list.append(f"Thời gian nằm viện kéo dài (**{safe_time_in_hospital}** ngày).")
+                if safe_discharge_disposition_id not in ["1", "6", "8", "Missing"]:
+                     warnings_list.append(f"Tình trạng xuất viện tiềm ẩn rủi ro (Mã: {safe_discharge_disposition_id}).")
 
                 if warnings_list:
                     for warning in warnings_list:
@@ -309,14 +331,12 @@ if submitted:
                     shap_values = explainer.shap_values(shap_input)
                     
                     if isinstance(shap_values, list):
-                        shap_values_to_plot = shap_values[1][0] # Lấy mảng class 1, phần tử đầu tiên (Local)
+                        shap_values_to_plot = shap_values[1][0] 
                     elif len(shap_values.shape) == 3: 
                          shap_values_to_plot = shap_values[0, :, 1]
                     else:
-                        shap_values_to_plot = shap_values[0] # Local
+                        shap_values_to_plot = shap_values[0] 
 
-                    # Vẽ Waterfall plot cho giải thích Local
-                    # Cần tính expected_value
                     if isinstance(explainer.expected_value, list) or isinstance(explainer.expected_value, np.ndarray):
                         expected_value = explainer.expected_value[1] if len(explainer.expected_value) > 1 else explainer.expected_value[0]
                     else:
@@ -326,10 +346,15 @@ if submitted:
                                                    base_values=expected_value, 
                                                    data=shap_input.iloc[0], 
                                                    feature_names=safe_cols)
-
-                    fig_shap, ax_shap = plt.subplots(figsize=(10, 5))
+                    
+                    # [ĐÃ SỬA LỖI HIỂN THỊ WATERFALL]
+                    # Khởi tạo plt figure và gọi biểu đồ SHAP vào, sau đó gửi cho Streamlit
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    # Sử dụng matplotlib mode của SHAP waterfall, không hiển thị trực tiếp (show=False)
                     shap.plots.waterfall(explanation, max_display=10, show=False)
-                    st.pyplot(fig_shap)
+                    # Thiết lập thông số điều chỉnh layout cho hình ảnh để không bị cắt chữ
+                    plt.tight_layout()
+                    st.pyplot(fig, clear_figure=True)
                     
                 except Exception as e:
                     st.info(f"Không thể vẽ biểu đồ SHAP cho hồ sơ này. Chi tiết lỗi hệ thống: {e}")
