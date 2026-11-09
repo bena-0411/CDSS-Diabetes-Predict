@@ -38,12 +38,11 @@ DEFAULT_FEATURES = [
 try:
     bundle = load_model_bundle()
     
-    # 1. Trích xuất mô hình dự báo
+    # Trích xuất mô hình dự báo
     if isinstance(bundle, dict):
         model_to_predict = bundle.get("calibrator") or bundle.get("pipeline") or bundle.get("model")
         preprocessor = bundle.get("preprocessor")
         core_model = bundle.get("model")
-        # Tìm danh sách cột từ joblib, nếu không có thì dùng danh sách chuẩn DEFAULT_FEATURES
         saved_cols = bundle.get("feature_names") or bundle.get("selected_columns") or bundle.get("columns")
         feature_names = list(saved_cols) if saved_cols is not None and len(saved_cols) > 0 else DEFAULT_FEATURES
     else:
@@ -52,7 +51,6 @@ try:
         core_model = None
         feature_names = DEFAULT_FEATURES
 
-    # Nếu model/pipeline đã ghi nhớ các cột đã học lúc fit, lấy chính xác theo đó
     if hasattr(model_to_predict, "feature_names_in_"):
         feature_names = list(model_to_predict.feature_names_in_)
     elif preprocessor is not None and hasattr(preprocessor, "feature_names_in_"):
@@ -62,26 +60,29 @@ except Exception as e:
     st.error(f"Lỗi khi tải file mô hình `.joblib`: {e}")
     st.stop()
 
-# --- TẠO SHAP EXPLAINER ---
-# Tính toán TreeExplainer một lần rồi lưu cache để tránh giật lag
+# --- TẠO SHAP EXPLAINER (Đã xử lý CalibratedClassifierCV) ---
 @st.cache_resource
 def get_shap_explainer(_model):
     try:
-        # Nếu mô hình là một pipeline, lấy core estimator ở bước cuối cùng
-        if hasattr(_model, "steps"):
-            model_core = _model.steps[-1][1]
-        elif hasattr(_model, "estimator"):
-            model_core = _model.estimator
-        else:
-            model_core = _model
+        model_core = _model
         
-        # Extra Trees / Random Forest / XGBoost
+        # Nếu mô hình bị bọc bởi Pipeline, lấy bước cuối cùng
+        if hasattr(model_core, "steps"):
+            model_core = model_core.steps[-1][1]
+            
+        # Nếu mô hình bị bọc bởi CalibratedClassifierCV, lấy mô hình gốc
+        if hasattr(model_core, "calibrated_classifiers_"):
+            model_core = model_core.calibrated_classifiers_[0].estimator
+        elif hasattr(model_core, "estimator"):
+            model_core = model_core.estimator
+            
         explainer = shap.TreeExplainer(model_core)
-        return explainer, model_core
+        return explainer
     except Exception as e:
-        return None, None
+        print(f"Lỗi khởi tạo SHAP Explainer: {e}")
+        return None
 
-explainer, core_estimator = get_shap_explainer(core_model or model_to_predict)
+explainer = get_shap_explainer(core_model or model_to_predict)
 
 # --- 3. HEADER GIAO DIỆN ---
 st.markdown("""
@@ -91,7 +92,7 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# --- 4. FORM NHẬP LIỆU CHUYÊN SÂU (4 NHÓM) ---
+# --- 4. FORM NHẬP LIỆU CHUYÊN SÂU ---
 with st.form("prediction_form"):
     st.subheader("📋 Thông tin Định danh Bệnh nhân")
     id_col1, id_col2 = st.columns(2)
@@ -149,11 +150,9 @@ if submitted:
     if not patient_name.strip():
         st.warning("⚠️ Vui lòng nhập họ và tên bệnh nhân.")
     else:
-        # Tự động tính toán các đặc trưng kỹ thuật
         service_utilization = int(number_outpatient + number_emergency + number_inpatient)
         labs_per_day = float(num_lab_procedures / max(time_in_hospital, 1))
 
-        # Tập hợp tất cả các giá trị thu thập được
         raw_dict = {
             "age": age, "gender": gender, "race": race,
             "admission_type_id": str(admission_type_id),
@@ -178,33 +177,29 @@ if submitted:
             "metformin": metformin
         }
 
-        # Tạo DataFrame chứa đầy đủ cột theo yêu cầu của mô hình
         input_data = pd.DataFrame([raw_dict])
         
-        # Đảm bảo input_data có đúng và đủ các cột theo feature_names, không bao giờ bị rỗng
         for col in feature_names:
             if col not in input_data.columns:
                 input_data[col] = 0
         input_data = input_data[feature_names]
 
         try:
-            # 1. TIỀN XỬ LÝ NẾU CÓ PREPROCESSOR ĐỂ PHỤC VỤ SHAP
+            # Tiền xử lý cho SHAP
             if preprocessor is not None:
                 transformed_data = preprocessor.transform(input_data)
-                # Lấy tên cột sau khi transform (có thể bị mã hóa One-hot)
                 if hasattr(preprocessor, "get_feature_names_out"):
                     transformed_cols = preprocessor.get_feature_names_out()
                 else:
                     transformed_cols = [f"Feature_{i}" for i in range(transformed_data.shape[1])]
                 
-                # Biến đổi thành DataFrame để truyền vào SHAP
                 if hasattr(transformed_data, "toarray"):
                     transformed_data = transformed_data.toarray()
                 shap_input = pd.DataFrame(transformed_data, columns=transformed_cols)
             else:
                 shap_input = input_data
 
-            # 2. DỰ BÁO XÁC SUẤT
+            # Dự báo xác suất
             if hasattr(model_to_predict, "predict_proba"):
                 try:
                     prob_risk = model_to_predict.predict_proba(input_data)[0][1]
@@ -240,7 +235,6 @@ if submitted:
                 st.markdown(f"<div style='font-size: 18px; font-weight: bold; color: {risk_color}; margin-top: 8px;'>{risk_label}</div>", unsafe_allow_html=True)
                 st.info(f"**Khuyến nghị chuyên môn:**\n\n{risk_advice}")
 
-                # [ĐÃ THÊM MỚI] - Cảnh báo các chỉ số lâm sàng bất thường
                 st.markdown("#### 🚨 Các chỉ số cần lưu ý:")
                 warnings_list = []
                 if number_inpatient > 0:
@@ -261,7 +255,6 @@ if submitted:
                     st.success("Không phát hiện chỉ số lâm sàng bất thường nghiêm trọng.")
 
             with res_col2:
-                # Vẽ biểu đồ Gauge đo rủi ro trực quan
                 fig_gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=prob_percent,
@@ -282,11 +275,10 @@ if submitted:
                         }
                     }
                 ))
-                # [ĐÃ SỬA] - Tăng lề trên (t) lên 60 để không bị cắt mất chữ
                 fig_gauge.update_layout(height=300, margin=dict(l=30, r=30, t=60, b=20))
                 st.plotly_chart(fig_gauge, use_container_width=True)
 
-            # [ĐÃ THÊM MỚI] - GIẢI THÍCH MÔ HÌNH BẰNG SHAP
+            # GIẢI THÍCH MÔ HÌNH BẰNG SHAP
             if explainer is not None:
                 st.divider()
                 st.markdown("#### 🔬 Giải thích Khuyến nghị (Explainable AI bằng SHAP)")
@@ -295,18 +287,14 @@ if submitted:
                 try:
                     shap_values = explainer.shap_values(shap_input)
                     
-                    # Nếu là mô hình phân lớp nhị phân, shap_values có thể là mảng 2 chiều hoặc list 2 mảng.
-                    # Ta cần lấy mảng ứng với lớp 1 (rủi ro cao)
                     if isinstance(shap_values, list):
                         shap_values_to_plot = shap_values[1]
+                    elif len(shap_values.shape) == 3: 
+                         shap_values_to_plot = shap_values[:, :, 1]
                     else:
                         shap_values_to_plot = shap_values
 
-                    # Vẽ biểu đồ SHAP waterfall hoặc bar
-                    # Do waterfall cần thêm đối tượng Explanation, dùng bar cho dễ và ổn định trên Streamlit
                     fig_shap, ax_shap = plt.subplots(figsize=(10, 5))
-                    
-                    # Rút gọn tên cột nếu nó quá dài sau khi One-hot encoding
                     short_cols = [c.replace("cat__", "").replace("num__", "") for c in shap_input.columns]
                     shap_input.columns = short_cols
                     
@@ -314,13 +302,12 @@ if submitted:
                     st.pyplot(fig_shap)
                     
                 except Exception as e:
-                    st.info("Mô hình này không hỗ trợ giải thích trực quan (SHAP) trên giao diện Web.")
+                    st.info(f"Không thể vẽ biểu đồ SHAP cho hồ sơ này. Chi tiết lỗi hệ thống: {e}")
 
-            # [ĐÃ SỬA] - Lấy giờ Việt Nam (UTC+7)
+            # Lấy giờ Việt Nam
             vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
             current_time = datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M")
 
-            # Lưu vào danh sách lịch sử bệnh nhân
             st.session_state.patient_history.insert(0, {
                 "Thời gian": current_time,
                 "Mã BN": patient_id,
