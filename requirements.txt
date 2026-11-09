@@ -3,3 +3,5 @@ xgboost
 shap
 joblib
 pytz
+plotly
+matplotlib
