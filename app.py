@@ -7,6 +7,7 @@ from datetime import datetime
 import pytz
 import shap
 import matplotlib.pyplot as plt
+import re
 
 # --- 1. CẤU HÌNH TRANG ---
 st.set_page_config(
@@ -60,7 +61,7 @@ except Exception as e:
     st.error(f"Lỗi khi tải file mô hình `.joblib`: {e}")
     st.stop()
 
-# --- TẠO SHAP EXPLAINER (Đã xử lý CalibratedClassifierCV) ---
+# --- TẠO SHAP EXPLAINER ---
 @st.cache_resource
 def get_shap_explainer(_model):
     try:
@@ -96,8 +97,9 @@ st.markdown("""
 with st.form("prediction_form"):
     st.subheader("📋 Thông tin Định danh Bệnh nhân")
     id_col1, id_col2 = st.columns(2)
-    with id_col1: patient_name = st.text_input("Họ và tên bệnh nhân", value="Nguyễn Văn A")
-    with id_col2: patient_id = st.text_input("Mã Hồ sơ Bệnh án", value="BN-2026-1005")
+    # [ĐÃ SỬA] - Xóa giá trị mặc định để trống cho người dùng nhập
+    with id_col1: patient_name = st.text_input("Họ và tên bệnh nhân", placeholder="Nhập họ và tên...")
+    with id_col2: patient_id = st.text_input("Mã Hồ sơ Bệnh án", placeholder="Nhập mã hồ sơ...")
 
     st.subheader("Nhóm 1: Thông tin Hành chính & Nhập viện")
     c1_1, c1_2, c1_3 = st.columns(3)
@@ -285,6 +287,14 @@ if submitted:
                 st.markdown("Biểu đồ thể hiện mức độ tác động của từng đặc trưng lâm sàng đẩy xác suất rủi ro **Lên cao (Đỏ)** hoặc **Xuống thấp (Xanh)**.")
                 
                 try:
+                    # [ĐÃ SỬA] - Loại bỏ ký tự đặc biệt khỏi tên cột để tránh lỗi của XGBoost/SHAP
+                    safe_cols = []
+                    for c in shap_input.columns:
+                        safe_c = re.sub(r'[\[\]<>]', '_', c) # Thay thế [, ], <, > bằng _
+                        safe_c = safe_c.replace("cat__", "").replace("num__", "")
+                        safe_cols.append(safe_c)
+                    shap_input.columns = safe_cols
+
                     shap_values = explainer.shap_values(shap_input)
                     
                     if isinstance(shap_values, list):
@@ -295,8 +305,6 @@ if submitted:
                         shap_values_to_plot = shap_values
 
                     fig_shap, ax_shap = plt.subplots(figsize=(10, 5))
-                    short_cols = [c.replace("cat__", "").replace("num__", "") for c in shap_input.columns]
-                    shap_input.columns = short_cols
                     
                     shap.summary_plot(shap_values_to_plot, shap_input, plot_type="bar", max_display=10, show=False)
                     st.pyplot(fig_shap)
