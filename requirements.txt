@@ -1,10 +1,5 @@
-streamlit
-pandas
-numpy
 scikit-learn
 xgboost
 shap
-plotly
 joblib
 pytz
-matplotlibgit 
